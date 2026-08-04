@@ -112,7 +112,65 @@ first proves the refusal works, the second proves the acceptance still does.
 and a command that fails on drift (`npm ci`, not `npm install`). The lockfile's own hash
 belongs in the provenance record.
 
-## 4. The provenance record
+## 4. Multi-platform
+
+A platform an installer does not name is a platform it does not support, and saying so is
+kinder than a half-install.
+
+**4.1 Enumerate, then refuse.** Supported `(platform, architecture)` pairs MUST be an
+explicit allowlist, and anything outside it MUST terminate with a message naming what was
+found. Best-effort installation onto an unrecognised platform produces a broken tree that
+looks installed.
+
+```bash
+case "$MACHINE" in
+  x86_64|amd64)  ARCHITECTURE="x64"   ;;
+  arm64|aarch64) ARCHITECTURE="arm64" ;;
+  *) die "Unsupported processor architecture: $MACHINE." ;;
+esac
+```
+
+**4.2 Normalise architecture names once.** `x86_64`/`amd64` and `arm64`/`aarch64` are the
+same targets under different names. Normalise at the boundary so no later comparison has
+to know both spellings.
+
+**4.3 Identify the distribution, not just the kernel.** `uname -s` returning `Linux` says
+nothing about whether the package assumptions hold. Read `/etc/os-release` and refuse a
+distribution that has not been tested.
+
+**4.4 Use platform-native roots.** `~/Library/Application Support/<Name>` on macOS,
+`${XDG_DATA_HOME:-$HOME/.local/share}/<Name>` on Linux, `%LOCALAPPDATA%\<Name>` on
+Windows. One override variable, honoured on every platform.
+
+**4.5 One installer per platform family.** A POSIX shell script and a PowerShell script,
+each readable on its own, beat one script threaded with branches. They MUST enforce the
+same rules — §5 applies to each independently.
+
+**4.6 Verify per-platform binaries per platform.** A native artifact has a different hash
+on every target. Each supported pair's hash MUST be verified separately; a single hash
+covering "the release" verifies nothing about the bytes that actually landed.
+
+**4.7 Require two-source agreement for native artifacts.** Where a dependency publishes
+its own checksum manifest, the installer SHOULD also carry a **reviewed** copy of the
+expected hash in-repo, and fail when the two disagree:
+
+```
+manifest hash (node_modules/electron/checksums.json)
+    vs
+reviewed hash (third_party/compliance-policy.json)
+    -> mismatch is fatal
+```
+
+This is the only rule here that defends against the *publisher* rather than the network.
+An upstream that silently changes a hash is caught because the reviewed value is committed
+and diffable.
+
+**4.8 CI runs the real installer on every supported platform.** Not a lint, not a dry run
+— the actual installer, on a runner for each pair, on every pull request. Including the
+§3.10 refusal test. A platform without a CI leg is unsupported no matter what the README
+says.
+
+## 5. The provenance record
 
 `<install_root>/versions/<pin>/.rapp-install.json`:
 
@@ -137,7 +195,7 @@ belongs in the provenance record.
 Every digest here is re-checked on the next run. That is what makes the record load-bearing
 rather than decorative.
 
-## 5. Conformance
+## 6. Conformance
 
 An installer is **rapp-local-install/1.0 conformant** if:
 
@@ -154,11 +212,14 @@ An installer is **rapp-local-install/1.0 conformant** if:
 - [ ] It writes a `rapp-local-install/1.0` provenance record.
 - [ ] It never pipes or executes an unverified remote script.
 - [ ] CI proves the mutable-reference refusal by observing it fire.
+- [ ] Supported platform/architecture pairs are an explicit allowlist; others are refused.
+- [ ] Native artifacts are verified per platform, not once per release.
+- [ ] CI runs the real installer on every supported pair.
 
 Conformance is **checkable, not claimable**: `check.py` scores an installer against these
-twelve rules and prints the evidence for each verdict.
+rules and prints the evidence for each verdict.
 
-## 6. What this deliberately does not require
+## 7. What this deliberately does not require
 
 - **Signatures.** Publisher-provided checksum manifests over HTTPS are the realistic floor
   today. Signing is strictly better and out of scope; nothing here forbids it.
@@ -166,7 +227,7 @@ twelve rules and prints the evidence for each verdict.
   implementation.
 - **Offline installs.** Reproducibility is required; network independence is not.
 
-## 7. Prior art
+## 8. Prior art
 
 `microsoft/skill-recorder` — `install.sh` is the closest thing to a reference
 implementation that existed before this document. It satisfies most of §5 on its own

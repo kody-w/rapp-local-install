@@ -53,6 +53,10 @@ RULES = [
          "Otherwise 'which version is this' is answerable only by guessing."),
     Rule("no_remote_exec", "Never executes an unverified remote script",
          "The most common violation and the hardest to notice once habitual."),
+    Rule("platform_allowlist", "Supported platform/arch pairs are an allowlist",
+         "A platform you do not name is a platform you do not support."),
+    Rule("ci_installs", "CI runs the real installer, including the refusal test",
+         "A platform without a CI leg is unsupported no matter what the README says."),
 ]
 
 # (rule, regex, human description). Multiple patterns may satisfy one rule.
@@ -69,6 +73,8 @@ SIGNALS = [
     ("manifest", r"required_install_files|required.*files|LICENSE\b.*\n.*LICENSE|THIRD-PARTY",
      "a required-files list"),
     ("provenance", r"rapp-local-install|\.rapp-install\.json|provenance", "a provenance record"),
+    ("platform_allowlist", r"Unsupported .*architecture|supports .* only|\*\)\s*die|throw \".*supports",
+     "an explicit platform/arch refusal"),
 ]
 
 # Anti-signals: presence is a FAIL regardless of anything else.
@@ -163,6 +169,22 @@ def main() -> int:
         return 1
 
     results = analyse(path.read_text(encoding="utf-8", errors="ignore"))
+
+    # CI evidence lives beside the installer, not inside it.
+    wf = path.parent / ".github" / "workflows"
+    results["ci_installs"]["evidence"].clear()   # judged here, not in analyse()
+    if wf.is_dir():
+        blob = "\n".join(f.read_text(encoding="utf-8", errors="ignore")
+                          for f in wf.glob("*.yml"))
+        runs = path.name in blob
+        refuses = bool(re.search(r"accepted a mutable source reference|COMMIT\s*=\s*[\"\']?(master|main)", blob))
+        results["ci_installs"]["ok"] = runs and refuses
+        results["ci_installs"]["evidence"].append(
+            {"found": f"workflows invoke {path.name}={runs}, refusal test={refuses}"}
+            if runs else {"missing": f"no workflow invokes {path.name}"})
+    else:
+        results["ci_installs"]["ok"] = False
+        results["ci_installs"]["evidence"].append({"missing": "no .github/workflows beside the installer"})
     score = sum(1 for v in results.values() if v["ok"])
 
     if "--json" in sys.argv:
