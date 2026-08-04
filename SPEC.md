@@ -144,7 +144,7 @@ Windows. One override variable, honoured on every platform.
 
 **4.5 One installer per platform family.** A POSIX shell script and a PowerShell script,
 each readable on its own, beat one script threaded with branches. They MUST enforce the
-same rules — §5 applies to each independently.
+same rules — §3 applies to each independently.
 
 **4.6 Verify per-platform binaries per platform.** A native artifact has a different hash
 on every target. Each supported pair's hash MUST be verified separately; a single hash
@@ -170,7 +170,58 @@ and diffable.
 §3.10 refusal test. A platform without a CI leg is unsupported no matter what the README
 says.
 
-## 5. The provenance record
+## 5. Bundled runtimes
+
+The hardest problem in a local install is usually not fetching a dependency. It is
+*finding* one that somebody else installed, somewhere else, under a `PATH` this process
+never sees. The most reliable way to resolve a required binary is to not resolve it.
+
+**5.1 Bundle what the product cannot run without.** A required third-party binary MUST
+ship inside the install tree. Resolving it from the user's environment makes correctness a
+property of their shell configuration — which the installer does not control, cannot test,
+and is never told about when it changes.
+
+**5.2 `PATH` is not a contract.** A process started by a GUI or a service manager does not
+inherit an interactive shell's environment. A launchd-started process on macOS gets
+`/usr/bin:/bin:/usr/sbin:/sbin` — no Homebrew, no `nvm`, no `~/.local/bin`. Code that
+compensates by *guessing* at those directories is the symptom, not the fix:
+
+```ts
+// the shape to delete, not to maintain
+const candidates = ["/opt/homebrew/bin", "~/.local/bin", "~/.volta/bin", "~/.asdf/shims"];
+```
+
+Every entry is a bet about one machine's layout. Bundling makes the whole list
+unnecessary — and deletes its inevitable second copy in whatever other language the
+project also ships.
+
+**5.3 Select the platform binary by declaration, not by branching.** Publish or consume one
+package per `(platform, arch)` pair, constrained by `os`/`cpu`, and let the package manager
+choose. Resolution then fails at install time on the machine that cannot be satisfied,
+rather than at first use.
+
+**5.4 A missing bundled binary is an install failure, not a runtime failure.** If it is
+absent, the install is broken and MUST say exactly that. Deferring the discovery to first
+use reports a packaging fault as an authentication or network error, which is where the
+debugging time goes.
+
+**5.5 Redistribution requires a grant you have actually read.** Bundling a third-party
+binary is redistribution. The licence MUST be read and its conditions recorded in-repo
+before shipping — never inferred from the ecosystem it is published to. A `license` field
+of the form `SEE LICENSE IN LICENSE.md` means the answer is not in the metadata, and a
+proprietary licence may still grant redistribution: the only way to know is to read it.
+
+**5.6 Ship the licence with the bytes.** Redistribution grants are near-universally
+conditioned on carrying the licence and attribution notices, and on the copy being
+unmodified. Vendoring the dependency **whole** satisfies this by construction; lifting just
+the binary out of its package is what breaks it. The completeness manifest (§2, row 9) MUST
+list the licence file.
+
+**5.7 Verify compliance against the packaged artifact.** A check that runs on the source
+tree proves nothing about what the packer emitted. It MUST run after packaging and inspect
+the artifact itself.
+
+## 6. The provenance record
 
 `<install_root>/versions/<pin>/.rapp-install.json`:
 
@@ -195,7 +246,7 @@ says.
 Every digest here is re-checked on the next run. That is what makes the record load-bearing
 rather than decorative.
 
-## 6. Conformance
+## 7. Conformance
 
 An installer is **rapp-local-install/1.0 conformant** if:
 
@@ -215,11 +266,13 @@ An installer is **rapp-local-install/1.0 conformant** if:
 - [ ] Supported platform/architecture pairs are an explicit allowlist; others are refused.
 - [ ] Native artifacts are verified per platform, not once per release.
 - [ ] CI runs the real installer on every supported pair.
+- [ ] Required third-party binaries are bundled, not resolved from `PATH`.
+- [ ] Every redistributed binary ships its licence, and the grant is recorded in-repo.
 
 Conformance is **checkable, not claimable**: `check.py` scores an installer against these
 rules and prints the evidence for each verdict.
 
-## 7. What this deliberately does not require
+## 8. What this deliberately does not require
 
 - **Signatures.** Publisher-provided checksum manifests over HTTPS are the realistic floor
   today. Signing is strictly better and out of scope; nothing here forbids it.
@@ -227,11 +280,13 @@ rules and prints the evidence for each verdict.
   implementation.
 - **Offline installs.** Reproducibility is required; network independence is not.
 
-## 8. Prior art
+## 9. Prior art
 
 `microsoft/skill-recorder` — `install.sh` is the closest thing to a reference
-implementation that existed before this document. It satisfies most of §5 on its own
+implementation that existed before this document. It satisfies most of §3 on its own
 merits and was the source of §3.5 and §3.8, both of which were derived by reading it
-rather than invented here.
+rather than invented here. §5 was derived the same way, from its handling of the bundled
+GitHub Copilot CLI — a proprietary binary whose licence grants redistribution, which it
+vendors unmodified, declares in `THIRD-PARTY-NOTICES.md`, and re-checks after packing.
 
 MIT © RAPP ecosystem — see the [map](https://github.com/kody-w/rapp-map).

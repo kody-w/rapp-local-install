@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Score an installer against rapp-local-install/1.0 §5.
+"""Score an installer against rapp-local-install/1.0 §3.
 
 Conformance is checkable, not claimable. This reads an installer script and
 reports, per rule, what it found and where — so a verdict can be argued with.
@@ -57,6 +57,8 @@ RULES = [
          "A platform you do not name is a platform you do not support."),
     Rule("ci_installs", "CI runs the real installer, including the refusal test",
          "A platform without a CI leg is unsupported no matter what the README says."),
+    Rule("bundled_runtime", "Required binaries are bundled, not found on PATH",
+         "A GUI process does not inherit your shell; PATH-guessing is the bug, not the fix."),
 ]
 
 # (rule, regex, human description). Multiple patterns may satisfy one rule.
@@ -171,6 +173,73 @@ def analyse(text: str) -> dict:
     return results
 
 
+def judge_bundled_runtime(root: Path, results: dict) -> None:
+    """§5 is a property of packaging, not of installer text — bundling leaves no
+    trace in the script at all. Judged from package.json, like ci_installs is
+    judged from workflows.
+
+    `ok=None` here means NOT APPLICABLE (no package.json), which is deliberately
+    distinct from False. Scoring a non-Node installer as failing a Node rule
+    would be the same mistake as defaulting prohibitions to FAIL.
+    """
+    r = results["bundled_runtime"]
+    r["evidence"].clear()
+
+    # An installer often sits above the package it installs (openrappter keeps
+    # its manifest in typescript/). Looking only beside the script reported
+    # "not applicable" for a project that genuinely does not bundle — hiding a
+    # real finding behind a clean score.
+    manifests = [p for p in [root / "package.json"] if p.is_file()]
+    if not manifests:
+        manifests = sorted(p for p in root.glob("*/package.json")
+                           if "node_modules" not in p.parts)[:8]
+    if not manifests:
+        r["ok"] = None
+        r["evidence"].append({"note": "no package.json found; rule not applicable"})
+        return
+
+    plat = re.compile(r"-(darwin|win32|linuxmusl|linux)-(x64|arm64)\b")
+    found: list[str] = []
+    for pj in manifests:
+        try:
+            pkg = json.loads(pj.read_text(encoding="utf-8", errors="ignore"))
+        except json.JSONDecodeError as exc:
+            r["ok"] = False
+            r["evidence"].append({"missing": f"{pj.name} does not parse: {exc}"})
+            return
+
+        deps = {}
+        for field in ("dependencies", "optionalDependencies", "devDependencies"):
+            deps.update(pkg.get(field) or {})
+        direct = sorted(n for n in deps if plat.search(n))
+
+        # Platform packages are usually transitive (a wrapper declares them as
+        # optionalDependencies), so for an app the honest signal is the
+        # packaging rule that unpacks them. Missing this scored skill-recorder
+        # — the reference implementation — as failing.
+        packaging = json.dumps(pkg.get("build") or {})
+        unpacked = sorted(set(re.findall(
+            r"node_modules/(@[\w.-]+/[\w.-]*\*?[\w.-]*|[\w.-]*\*[\w.-]*)/\*\*", packaging)))
+
+        where = pj.parent.name or "."
+        if direct:
+            found.append(f"{where}: declares {', '.join(direct[:4])}")
+        elif unpacked:
+            found.append(f"{where}: unpacks {', '.join(unpacked[:4])}")
+
+    if found:
+        r["ok"] = True
+        for f in found:
+            r["evidence"].append({"found": f})
+    else:
+        r["ok"] = False
+        r["evidence"].append(
+            {"missing": "no per-platform binary package declared or unpacked in "
+                        + ", ".join(str(p.relative_to(root)) for p in manifests)
+                        + "; the runtime is expected to already exist on the machine"})
+    return
+
+
 def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if not args:
@@ -198,18 +267,25 @@ def main() -> int:
     else:
         results["ci_installs"]["ok"] = False
         results["ci_installs"]["evidence"].append({"missing": "no .github/workflows beside the installer"})
-    score = sum(1 for v in results.values() if v["ok"])
+    judge_bundled_runtime(path.parent, results)
+
+    # ok is True (pass), False (fail), or None (not applicable). Counting None
+    # as a failure would penalise a non-Node installer for a Node rule.
+    score = sum(1 for v in results.values() if v["ok"] is True)
+    applicable = sum(1 for v in results.values() if v["ok"] is not None)
+    skipped = len(RULES) - applicable
 
     if "--json" in sys.argv:
         print(json.dumps({"schema": SPEC, "target": str(path),
-                          "score": score, "of": len(RULES), "rules": results}, indent=2))
-        return 0 if score == len(RULES) else 1
+                          "score": score, "of": applicable, "not_applicable": skipped,
+                          "rules": results}, indent=2))
+        return 0 if score == applicable else 1
 
     print(f"{SPEC} — {path}")
     print("=" * 72)
     for r in RULES:
         v = results[r.key]
-        mark = "PASS" if v["ok"] else "FAIL"
+        mark = "N/A " if v["ok"] is None else ("PASS" if v["ok"] else "FAIL")
         print(f"  [{mark}] {r.title}")
         for e in v["evidence"]:
             if "violation" in e:
@@ -217,7 +293,8 @@ def main() -> int:
                 print(f"         ! {e['violation']}  (line {e['line']}){tag}")
                 print(f"           {e['text']}")
             elif "note" in e:
-                print(f"         ~ {e['note']}  (line {e['line']})")
+                where = f"  (line {e['line']})" if "line" in e else ""
+                print(f"         ~ {e['note']}{where}")
             elif "missing" in e:
                 print(f"         - {e['missing']} — {r.why}")
             elif "line" in e:
@@ -225,10 +302,11 @@ def main() -> int:
             else:
                 print(f"         + {e['found']}")
     print("=" * 72)
-    print(f"  {score}/{len(RULES)} conformant")
+    tail = f"  ({skipped} not applicable)" if skipped else ""
+    print(f"  {score}/{applicable} conformant{tail}")
     print("\n  Static analysis: a PASS means the shape is present, not that the logic")
     print("  is sound. Read the code. A FAIL is a finding.")
-    return 0 if score == len(RULES) else 1
+    return 0 if score == applicable else 1
 
 
 if __name__ == "__main__":

@@ -23,6 +23,19 @@ warning nobody reads.
 
 The verification existed. It just did not bind.
 
+## The dependency you did not install
+
+§5 covers the other half of a local install: the binary your product cannot run without.
+The instinct is to find it on the user's machine — and a GUI process does not inherit
+your shell. A launchd-started app on macOS sees `/usr/bin:/bin:/usr/sbin:/sbin`: no
+Homebrew, no `nvm`, no `~/.local/bin`. The workaround is always the same list of guessed
+directories, and it is always maintained twice.
+
+Bundle it instead. Redistribution is often permitted even for proprietary binaries —
+GitHub's Copilot CLI licence grants it explicitly, on the condition that the copy is
+unmodified and ships its licence. §5.5 requires reading that grant rather than assuming
+it, in either direction.
+
 ## Conformance is checked, not claimed
 
 `check.py` reports per-rule evidence with file line numbers, so a verdict can be argued
@@ -38,6 +51,11 @@ checker that quotes a punchline as a security finding deserves to be ignored.
 [`microsoft/skill-recorder`](https://github.com/microsoft/skill-recorder) is the closest
 thing to a reference implementation that existed before this document. §3.5
 (re-verification), §3.8 (runtime identity), and §3.10 (prove the refusal in CI) were all
-derived by reading it rather than invented here.
+derived by reading it rather than invented here, as was §5 — it vendors the Copilot CLI
+unmodified, declares it in `THIRD-PARTY-NOTICES.md`, and re-checks after packing.
+
+It scores 14/15 against this spec. So does openrappter's `install-pinned.sh`, on a
+different 14: skill-recorder writes no provenance record, and openrappter bundles no
+runtime. Neither gap is visible from the other's.
 
 MIT © RAPP ecosystem — see the [map](https://github.com/kody-w/rapp-map).
