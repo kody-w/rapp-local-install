@@ -131,7 +131,16 @@ def analyse(text: str) -> dict:
     # fail_closed: a die/throw adjacent to verification is the positive signal,
     # but an anti-signal already recorded above always wins.
     if results["fail_closed"]["ok"] is None:
-        strict = find(r"die \".*(mismatch|checksum|SHA-256|hash)|throw .*(mismatch|hash)")
+        # Shell projects terminate in more ways than `die`. Accept any error
+        # report that is immediately followed by a non-zero exit, which is what
+        # fail-closed actually means. The first version only matched `die` and
+        # scored a correctly-hardened installer as failing.
+        strict = find(r"(die|ui_error|throw|Write-Error)[^\n]*"
+                      r"(mismatch|checksum|SHA-256|hash|refusing|unverified)")
+        if strict:
+            has_exit = find(r"^\s*(return 1|exit 1|die |throw )")
+            if not has_exit:
+                strict = []
         if strict:
             results["fail_closed"]["ok"] = True
             results["fail_closed"]["evidence"].append(
