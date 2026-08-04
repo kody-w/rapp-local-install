@@ -121,12 +121,16 @@ def analyse(text: str) -> dict:
         if not hits:
             continue
         real = [h for h in hits if not is_prose(h[1])]
-        chosen = real[0] if real else hits[0]
-        results[key]["ok"] = False
-        ev = {"violation": desc, "line": chosen[0], "text": chosen[1]}
         if not real:
-            ev["weak"] = "matched only in a comment or string literal"
-        results[key]["evidence"].append(ev)
+            # Prose-only match: a comment saying "no sudo" is not a sudo call.
+            # Record it as context, do not fail the rule on it.
+            results[key]["evidence"].append(
+                {"note": "pattern appears only in a comment or string",
+                 "line": hits[0][0], "text": hits[0][1]})
+            continue
+        results[key]["ok"] = False
+        results[key]["evidence"].append(
+            {"violation": desc, "line": real[0][0], "text": real[0][1]})
 
     # fail_closed: a die/throw adjacent to verification is the positive signal,
     # but an anti-signal already recorded above always wins.
@@ -138,7 +142,7 @@ def analyse(text: str) -> dict:
         strict = find(r"(die|ui_error|throw|Write-Error)[^\n]*"
                       r"(mismatch|checksum|SHA-256|hash|refusing|unverified)")
         if strict:
-            has_exit = find(r"^\s*(return 1|exit 1|die |throw )")
+            has_exit = find(r"(^\s*|\|\|\s*|&&\s*)(return 1|exit 1|die\b|throw\b)")
             if not has_exit:
                 strict = []
         if strict:
@@ -212,6 +216,8 @@ def main() -> int:
                 tag = "  [weak: comment/string only]" if e.get("weak") else ""
                 print(f"         ! {e['violation']}  (line {e['line']}){tag}")
                 print(f"           {e['text']}")
+            elif "note" in e:
+                print(f"         ~ {e['note']}  (line {e['line']})")
             elif "missing" in e:
                 print(f"         - {e['missing']} — {r.why}")
             elif "line" in e:
