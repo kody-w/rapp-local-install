@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""Score an installer against rapp-local-install/1.0 §5.
+
+Conformance is checkable, not claimable. This reads an installer script and
+reports, per rule, what it found and where — so a verdict can be argued with.
+
+    python3 check.py path/to/install.sh
+    python3 check.py path/to/install.sh --json
+
+Deliberate limitation, stated rather than hidden: this is static analysis of
+shell/PowerShell text. It can prove a pattern is ABSENT far more reliably than
+it can prove one is correct. A PASS means "the shape is there"; it does not
+mean the logic is sound. Treat a PASS as an invitation to read the code, and a
+FAIL as a finding.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+SPEC = "rapp-local-install/1.0"
+
+
+class Rule:
+    def __init__(self, key, title, why):
+        self.key, self.title, self.why = key, title, why
+
+
+RULES = [
+    Rule("pin", "Requires an exact immutable pin",
+         "Two users running the same command a day apart must get identical bytes."),
+    Rule("https_only", "Refuses non-HTTPS transport explicitly",
+         "Assuming HTTPS is not the same as refusing anything else."),
+    Rule("verify", "Verifies artifacts against a publisher manifest",
+         "A download nobody hashed is a download nobody checked."),
+    Rule("fail_closed", "Every verification path fails closed",
+         "A check that degrades to a no-op and reports success is worse than no check."),
+    Rule("name_check", "Validates artifact filenames against a pattern",
+         "A hash proves bytes are unmodified, not that they are the bytes you asked for."),
+    Rule("reverify", "Re-verifies installed binaries on later runs",
+         "Presence is not integrity; a directory proves something wrote to it once."),
+    Rule("no_global", "Writes nothing outside its root; no elevation",
+         "Uninstall should be rm -rf of one directory."),
+    Rule("content_addressed", "Versions live at versions/<pin>/",
+         "Upgrade must not mutate a working install."),
+    Rule("identity", "Queries the runtime's identity after extraction",
+         "An archive named darwin-arm64 that reports linux-x64 is worth learning early."),
+    Rule("manifest", "Checks an explicit completeness manifest",
+         "Including licenses, which are the files most often silently dropped."),
+    Rule("provenance", "Writes a provenance record",
+         "Otherwise 'which version is this' is answerable only by guessing."),
+    Rule("no_remote_exec", "Never executes an unverified remote script",
+         "The most common violation and the hardest to notice once habitual."),
+]
+
+# (rule, regex, human description). Multiple patterns may satisfy one rule.
+SIGNALS = [
+    ("pin", r"\b[0-9a-f]{40}\b|COMMIT\b|\bpin(ned)?\b", "an explicit commit/pin variable"),
+    ("https_only", r"Refusing non-HTTPS|refuse.*non-https|https://\*\)", "an explicit non-HTTPS refusal"),
+    ("verify", r"SHASUMS|sha256sum|shasum -a 256|Get-FileHash", "hash verification"),
+    ("name_check", r"Unexpected .*archive name|archive_name\)|expected pattern", "a filename pattern check"),
+    ("reverify", r"\.archive-sha256|\.node-sha256|-sha256\"|validate_existing_install|Re-?verif",
+     "recorded hashes re-checked on reuse"),
+    ("content_addressed", r"versions/\$|versions/\{|VERSIONS_ROOT|versions[\\/]<", "a versions/<pin> layout"),
+    ("identity", r"process\.versions|process\.platform|process\.arch|--version.*!=|Expected .* got ",
+     "a post-extraction identity assertion"),
+    ("manifest", r"required_install_files|required.*files|LICENSE\b.*\n.*LICENSE|THIRD-PARTY",
+     "a required-files list"),
+    ("provenance", r"rapp-local-install|\.rapp-install\.json|provenance", "a provenance record"),
+]
+
+# Anti-signals: presence is a FAIL regardless of anything else.
+ANTI = [
+    ("no_remote_exec", r"curl[^\n|]*\|\s*(ba)?sh|iwr[^\n|]*\|\s*iex|bash\s+<\(\s*curl",
+     "a remote script piped straight to a shell"),
+    ("no_remote_exec", r"run_remote_bash|/bin/bash \"\$tmp\"", "a downloaded script executed unverified"),
+    ("no_global", r"\bsudo\b(?!.*#)|npm i(nstall)? -g\b|brew install\b", "elevation or a global install"),
+    ("fail_closed", r"skipping verification|could not.*verif.*continu|warn.*skip.*verif",
+     "verification skipped with a warning instead of an error"),
+]
+
+
+def analyse(text: str) -> dict:
+    lines = text.split("\n")
+
+    def find(pattern):
+        rx = re.compile(pattern, re.I)
+        return [(i + 1, lines[i].strip()[:100]) for i in range(len(lines)) if rx.search(lines[i])]
+
+    results = {r.key: {"ok": None, "evidence": [], "rule": r.title, "why": r.why} for r in RULES}
+
+    for key, pat, desc in SIGNALS:
+        hits = find(pat)
+        if hits:
+            results[key]["ok"] = True
+            results[key]["evidence"].append({"found": desc, "line": hits[0][0], "text": hits[0][1]})
+
+    def is_prose(line: str) -> bool:
+        """A match inside a comment or a quoted literal is weak evidence.
+
+        The first version cited a joke tagline — `TAGLINES+=("npm install -g
+        openrappter - because you deserve nice things.")` - as proof of a
+        global install. The finding happened to be true for other reasons, but
+        a checker that quotes a punchline as a security finding gets dismissed,
+        and rightly so. Prefer executable evidence; fall back to prose only
+        when nothing better exists, and label it.
+        """
+        st = line.strip()
+        return st.startswith("#") or st.startswith("//") or bool(re.match(r'^[A-Z_]+\+?=\("', st))
+
+    for key, pat, desc in ANTI:
+        hits = find(pat)
+        if not hits:
+            continue
+        real = [h for h in hits if not is_prose(h[1])]
+        chosen = real[0] if real else hits[0]
+        results[key]["ok"] = False
+        ev = {"violation": desc, "line": chosen[0], "text": chosen[1]}
+        if not real:
+            ev["weak"] = "matched only in a comment or string literal"
+        results[key]["evidence"].append(ev)
+
+    # fail_closed: a die/throw adjacent to verification is the positive signal,
+    # but an anti-signal already recorded above always wins.
+    if results["fail_closed"]["ok"] is None:
+        strict = find(r"die \".*(mismatch|checksum|SHA-256|hash)|throw .*(mismatch|hash)")
+        if strict:
+            results["fail_closed"]["ok"] = True
+            results["fail_closed"]["evidence"].append(
+                {"found": "verification failure terminates the install",
+                 "line": strict[0][0], "text": strict[0][1]})
+
+    # Rules expressed purely as anti-signals are PROHIBITIONS: absence of the
+    # bad pattern is compliance. Defaulting them to FAIL penalised the correct
+    # behaviour — caught by running this against a well-built installer, which
+    # scored 10/12 for never doing two things it is supposed to never do.
+    PROHIBITIONS = {
+        "no_global": "no elevation or global install detected",
+        "no_remote_exec": "no unverified remote script execution detected",
+    }
+    for key, msg in PROHIBITIONS.items():
+        if results[key]["ok"] is None:
+            results[key]["ok"] = True
+            results[key]["evidence"].append({"found": msg})
+
+    for k, v in results.items():
+        if v["ok"] is None:
+            v["ok"] = False
+            v["evidence"].append({"missing": "no signal found"})
+    return results
+
+
+def main() -> int:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if not args:
+        print(__doc__)
+        return 1
+    path = Path(args[0])
+    if not path.is_file():
+        print(f"not a file: {path}", file=sys.stderr)
+        return 1
+
+    results = analyse(path.read_text(encoding="utf-8", errors="ignore"))
+    score = sum(1 for v in results.values() if v["ok"])
+
+    if "--json" in sys.argv:
+        print(json.dumps({"schema": SPEC, "target": str(path),
+                          "score": score, "of": len(RULES), "rules": results}, indent=2))
+        return 0 if score == len(RULES) else 1
+
+    print(f"{SPEC} — {path}")
+    print("=" * 72)
+    for r in RULES:
+        v = results[r.key]
+        mark = "PASS" if v["ok"] else "FAIL"
+        print(f"  [{mark}] {r.title}")
+        for e in v["evidence"]:
+            if "violation" in e:
+                tag = "  [weak: comment/string only]" if e.get("weak") else ""
+                print(f"         ! {e['violation']}  (line {e['line']}){tag}")
+                print(f"           {e['text']}")
+            elif "missing" in e:
+                print(f"         - {e['missing']} — {r.why}")
+            elif "line" in e:
+                print(f"         + {e['found']}  (line {e['line']})")
+            else:
+                print(f"         + {e['found']}")
+    print("=" * 72)
+    print(f"  {score}/{len(RULES)} conformant")
+    print("\n  Static analysis: a PASS means the shape is present, not that the logic")
+    print("  is sound. Read the code. A FAIL is a finding.")
+    return 0 if score == len(RULES) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
