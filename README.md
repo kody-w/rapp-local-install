@@ -1,5 +1,9 @@
 # rapp-local-install/1.0
 
+<!-- rapp1:network-header:start -->
+[![RAPP/1](https://kody-w.github.io/rapp-hive-public/portfolio/badges/rapp-local-install.svg)](https://github.com/kody-w/rapp-hive-public/blob/main/portfolio/repos/rapp-local-install.md) · **New to RAPP?** [Start here: get your Brainstem →](https://github.com/kody-w/rapp-installer#start-here)
+<!-- rapp1:network-header:end -->
+
 **A convention for installing software onto a device from source, verifiably, with
 nothing installed globally and no trust placed in anything that was not checked.**
 
